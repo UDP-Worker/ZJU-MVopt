@@ -1,172 +1,204 @@
-# find_ring_center.py
-# -*- coding: utf-8 -*-
-"""
-从当前路径读取两幅条纹图，先做配对加性平均以抵消条纹项，随后在平均图上分割低反射圆域，
-提取其边界并用代数最小二乘拟合圆，得到中心与半径；将结果叠加回两幅原图并保存。
-"""
-import argparse
-import json
-import math
-import csv
+# pipeline_debug.py
+import json, csv
 from pathlib import Path
 import numpy as np
 import cv2
 
+def imread_gray(p: str) -> np.ndarray:
+    im = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+    if im is None:
+        raise FileNotFoundError(p)
+    if im.ndim == 3:
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    return im.astype(np.float32)
 
-def imread_gray(path: Path) -> np.ndarray:
-    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise FileNotFoundError(f"无法读取图像：{path}")
-    if img.ndim == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return img.astype(np.float32)
-
+def save_gray01(name: str, im01: np.ndarray):
+    im8 = (np.clip(im01, 0.0, 1.0) * 255).astype(np.uint8)
+    cv2.imwrite(name, im8)
 
 def normalize01(im: np.ndarray) -> np.ndarray:
-    im_min, im_max = float(im.min()), float(im.max())
-    if im_max <= im_min:
-        return np.zeros_like(im, dtype=np.float32)
-    return (im - im_min) / (im_max - im_min)
+    mn, mx = float(im.min()), float(im.max())
+    if mx <= mn:
+        return np.zeros_like(im, np.float32)
+    return (im - mn) / (mx - mn)
 
+def average_pair(im1: np.ndarray, im2: np.ndarray) -> np.ndarray:
+    return (im1 + im2) * 0.5
 
-def pick_center_component(mask: np.ndarray, min_area: int = 100) -> np.ndarray:
-    """在二值图中挑选面积足够大且质心最接近图像中心的连通域，返回该连通域的掩膜。"""
-    H, W = mask.shape
-    num, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        (mask > 0).astype(np.uint8), connectivity=4
-    )
+def box_blur_integral(im: np.ndarray, k: int) -> np.ndarray:
+    assert im.ndim == 2 and k % 2 == 1
+    p = k // 2
+    im_pad = np.pad(im, ((p, p), (p, p)), mode='reflect')
+    ii = im_pad.astype(np.float64).cumsum(0).cumsum(1)
+    ii = np.pad(ii, ((1, 0), (1, 0)), mode='constant', constant_values=0)
+    K = k
+    sums = ii[K:, K:] - ii[:-K, K:] - ii[K:, :-K] + ii[:-K, :-K]
+    return (sums / (K * K)).astype(np.float32)
+
+def conv_sum2d01(mask01: np.ndarray, k: int = 3) -> np.ndarray:
+    p = k // 2
+    pad = np.pad(mask01, ((p, p), (p, p)), mode='reflect')
+    ii = pad.cumsum(0).cumsum(1)
+    ii = np.pad(ii, ((1, 0), (1, 0)), mode='constant', constant_values=0)
+    K = k
+    return ii[K:, K:] - ii[:-K, K:] - ii[K:, :-K] + ii[:-K, :-K]
+
+def morph_open3(mask01: np.ndarray) -> np.ndarray:
+    cnt = conv_sum2d01(mask01, 3)
+    eroded = (cnt == 9).astype(np.uint8)
+    cnt2 = conv_sum2d01(eroded, 3)
+    dil = (cnt2 > 0).astype(np.uint8)
+    return dil
+
+def boundary_from_mask(mask01: np.ndarray) -> np.ndarray:
+    cnt = conv_sum2d01(mask01, 3)
+    boundary = (mask01 == 1) & (cnt < 9)
+    ys, xs = np.nonzero(boundary)
+    return np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+
+def fit_circle_algebraic(pts_xy: np.ndarray):
+    x, y = pts_xy[:, 0], pts_xy[:, 1]
+    M = np.column_stack([x, y, np.ones_like(x)])
+    b = -(x*x + y*y)
+    A, B, C = np.linalg.lstsq(M, b, rcond=None)[0]
+    xc, yc = -A / 2.0, -B / 2.0
+    r = float(np.sqrt(max(xc*xc + yc*yc - C, 0.0)))
+    return float(xc), float(yc), r
+
+def pick_center_component(mask01: np.ndarray, min_area: int = 150) -> np.ndarray:
+    H, W = mask01.shape
+    num, labels, stats, cents = cv2.connectedComponentsWithStats(mask01.astype(np.uint8), connectivity=4)
     if num <= 1:
-        raise RuntimeError("未检测到连通域")
-    img_cy, img_cx = H / 2.0, W / 2.0
+        return mask01 * 0
+    img_cy, img_cx = H/2.0, W/2.0
 
-    best_id, best_d2 = None, 1e18
-    for i in range(1, num):  # 0 是背景
+    best, bestd = None, 1e18
+    for i in range(1, num):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_area:
             continue
-        cy, cx = centroids[i]
-        d2 = (cy - img_cy) ** 2 + (cx - img_cx) ** 2
-        if d2 < best_d2:
-            best_d2, best_id = d2, i
+        cy, cx = cents[i]
+        d2 = (cy - img_cy)**2 + (cx - img_cx)**2
+        if d2 < bestd:
+            best, bestd = i, d2
+    if best is None:
+        for i in range(1, num):
+            cy, cx = cents[i]
+            d2 = (cy - img_cy)**2 + (cx - img_cx)**2
+            if d2 < bestd:
+                best, bestd = i, d2
+    return (labels == best).astype(np.uint8), stats, cents
 
-    if best_id is None:
-        raise RuntimeError("没有满足面积阈值的目标连通域")
-    return (labels == best_id).astype(np.uint8)
+def fill_holes_cv(mask01: np.ndarray) -> np.ndarray:
+    m = (mask01 * 255).astype(np.uint8)
+    h, w = m.shape
+    inv = cv2.bitwise_not(m)
+    ff = inv.copy()
+    mask = np.zeros((h+2, w+2), np.uint8)
+    cv2.floodFill(ff, mask, seedPoint=(0, 0), newVal=255)
+    holes = cv2.bitwise_not(ff)
+    filled = cv2.bitwise_or(m, holes)
+    return (filled > 0).astype(np.uint8)
 
+def boundary_outer_only(mask01: np.uint8) -> np.ndarray:
+    filled = fill_holes_cv(mask01)
+    cv2.imwrite("step5b_filled.png", filled * 255)
 
-def contour_from_mask(mask: np.ndarray) -> np.ndarray:
-    """从掩膜得到外边界点集（N×2，顺序无关）。"""
-    # 细化为边界：形态学梯度 或 直接找轮廓
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        raise RuntimeError("未找到目标轮廓")
+        raise RuntimeError("未找到外轮廓")
     cnt = max(contours, key=cv2.contourArea)
-    pts = cnt.reshape(-1, 2).astype(np.float32)
+    pts = cnt.reshape(-1, 2).astype(np.float64)
     return pts
 
+def run_pipeline(img1_path="1.png", img2_path="2.png",
+                 k_bg=51,         # 大核背景（平坦化）
+                 k_smooth=5,      # 小核去噪
+                 dark_offset=0.05,# 相对背景的暗度阈值（越大越严格）
+                 min_area=2000    # 目标最小面积（按你的图像分辨率可调）
+                 ):
+    out_dir = Path(".")
+    # Step 0: 读入与归一化
+    im1 = normalize01(imread_gray(img1_path))
+    im2 = normalize01(imread_gray(img2_path))
+    save_gray01(str(out_dir/"step0_img1_norm.png"), im1)
+    save_gray01(str(out_dir/"step0_img2_norm.png"), im2)
 
-def fit_circle_algebraic(pts_xy: np.ndarray) -> tuple[float, float, float]:
-    """
-    代数最小二乘拟合：x^2 + y^2 + A x + B y + C = 0
-    解 [A,B,C]^T = argmin ||M*[A,B,C]^T + b||_2
-    """
-    x = pts_xy[:, 0].astype(np.float64)
-    y = pts_xy[:, 1].astype(np.float64)
-    M = np.column_stack([x, y, np.ones_like(x)])
-    b = -(x * x + y * y)
-    A, B, C = np.linalg.lstsq(M, b, rcond=None)[0]
-    xc, yc = -A / 2.0, -B / 2.0
-    r = math.sqrt(max(xc * xc + yc * yc - C, 0.0))
-    return float(xc), float(yc), float(r)
+    # Step 1: 配对平均
+    avg = average_pair(im1, im2)
+    save_gray01(str(out_dir/"step1_avg.png"), avg)
 
+    # Step 2: 平坦化
+    bg = box_blur_integral(avg, k=k_bg)
+    save_gray01(str(out_dir/"step2_bg_box{:d}.png".format(k_bg)), normalize01(bg))
+    rel = normalize01(bg - avg)
+    save_gray01(str(out_dir/"step2_rel_bg_minus_avg.png"), rel)
 
-def robust_refit(pts: np.ndarray, xc: float, yc: float, r: float, k: float = 2.5):
-    """一次性剔除半径残差的离群点后再拟合，增强鲁棒性。"""
-    rr = np.sqrt((pts[:, 0] - xc) ** 2 + (pts[:, 1] - yc) ** 2)
-    resid = np.abs(rr - r)
-    med = np.median(resid)
-    if med <= 1e-6:
-        return xc, yc, r
-    keep = resid < (k * 1.4826 * med)  # MAD 规则
-    xc2, yc2, r2 = fit_circle_algebraic(pts[keep])
-    return xc2, yc2, r2
+    # Step 3: 小核去噪
+    blur = box_blur_integral(rel, k=k_smooth)
+    save_gray01(str(out_dir/"step3_rel_box{:d}.png".format(k_smooth)), blur)
 
+    # Step 4: 阈值分割（相对背景更“暗”的区域）
+    med = float(np.median(blur))
+    mad = float(np.median(np.abs(blur - med))) + 1e-6
+    T = max(med + 2.5*mad, med + dark_offset)  # 你可以把 2.5 改小/改大
+    mask = (blur > T).astype(np.uint8)  # rel=bg-avg 越大越暗
+    save_gray01(str(out_dir/"step4_mask_raw.png"), mask)
 
-def overlay_and_save(img_path: Path, xc: float, yc: float, r: float, out_path: Path):
-    img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-    if img is None:
-        return
-    # 画圆与圆心
-    cv2.circle(img, (int(round(xc)), int(round(yc))), int(round(r)), (255, 255, 255), 2)
-    cv2.circle(img, (int(round(xc)), int(round(yc))), 2, (255, 255, 255), 2)
-    cv2.imwrite(str(out_path), img)
+    # Step 5: 3x3 开运算，去掉细小条纹与噪点
+    mask_open = morph_open3(mask)
+    save_gray01(str(out_dir/"step5_mask_open.png"), mask_open)
 
+    # Step 6: 连通域标注与可视化
+    comp, stats, cents = pick_center_component(mask_open, min_area=min_area)
+    num, labels = cv2.connectedComponents(mask_open.astype(np.uint8))
+    vis_lab = (255.0 * labels / max(1, num-1)).astype(np.uint8)
+    cv2.imwrite(str(out_dir/"step6_labels.png"), vis_lab)
+    save_gray01(str(out_dir/"step6_target_mask.png"), comp)
 
-def main():
-    ap = argparse.ArgumentParser(description="低反射圆环中心坐标估计")
-    ap.add_argument("--img1", default="1.png", help="第一幅图像文件名")
-    ap.add_argument("--img2", default="2.png", help="第二幅图像文件名")
-    ap.add_argument("--low-quantile", type=float, default=0.20,
-                    help="低反射分割的分位阈值（0~1，默认0.20表示最暗20%%）")
-    ap.add_argument("--blur", type=int, default=5, help="GaussianBlur 核大小（奇数）")
-    ap.add_argument("--flatfield", type=int, default=0,
-                    help="是否做平坦化（大核模糊减法），0=否，>0 表示核大小")
-    ap.add_argument("--min-area", type=int, default=150, help="目标连通域最小面积像素")
-    args = ap.parse_args()
+    # Step 7: 取边界并拟合圆
+    # pts = boundary_from_mask(comp)
+    pts = boundary_outer_only(comp)
 
-    p1, p2 = Path(args.img1), Path(args.img2)
-    g1 = imread_gray(p1)
-    g2 = imread_gray(p2)
-
-    # 1) 配对加性平均，抵消条纹项
-    avg = (g1 + g2) * 0.5
-
-    # 可选平坦化：去除慢变化背景
-    if args.flatfield and args.flatfield > 0:
-        k = args.flatfield if args.flatfield % 2 == 1 else args.flatfield + 1
-        bg = cv2.GaussianBlur(avg, (k, k), 0)
-        avg = cv2.normalize(avg - bg, None, 0, 1, cv2.NORM_MINMAX)
-        avg = (avg * 255.0).astype(np.float32)
-
-    # 2) 轻度平滑
-    k = args.blur if args.blur % 2 == 1 else args.blur + 1
-    avg_blur = cv2.GaussianBlur(avg, (k, k), 0)
-
-    # 3) 低反射区域分割（按分位数阈值）
-    norm = normalize01(avg_blur)
-    thresh = np.quantile(norm, args.low_quantile)
-    mask = (norm < thresh).astype(np.uint8) * 255
-
-    # 小形态学开运算去噪
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    # 4) 选择靠近图像中心的目标连通域
-    target = pick_center_component(mask, min_area=args.min_area)
-
-    # 5) 轮廓点与圆拟合（含一次鲁棒再拟合）
-    pts = contour_from_mask(target)
+    if pts.shape[0] < 10:
+        raise RuntimeError("边界点过少，阈值/面积阈值可能过严。请调小 dark_offset 或 min_area。")
     xc, yc, r = fit_circle_algebraic(pts)
-    xc, yc, r = robust_refit(pts, xc, yc, r)
 
-    # 6) 结果叠加并导出
-    overlay_and_save(p1, xc, yc, r, Path("overlay1.png"))
-    overlay_and_save(p2, xc, yc, r, Path("overlay2.png"))
+    # Step 8: 可视化叠加
+    base8 = (avg * 255).clip(0, 255).astype(np.uint8)
+    base3 = cv2.cvtColor(base8, cv2.COLOR_GRAY2BGR)
+    for x, y in pts[:: max(1, pts.shape[0]//500) ]:
+        cv2.circle(base3, (int(round(x)), int(round(y))), 0, (255, 255, 255), 1)
+    cv2.circle(base3, (int(round(xc)), int(round(yc))), int(round(r)), (255, 255, 255), 2)
+    cv2.circle(base3, (int(round(xc)), int(round(yc))), 2, (255, 255, 255), 2)
+    cv2.imwrite(str(out_dir/"step8_boundary_fit_overlay.png"), base3)
 
-    # 输出与保存
+    # 结果输出
     result = {
-        "center_x_cols": float(xc),
-        "center_y_rows": float(yc),
-        "radius_px": float(r),
-        "images": [str(p1.name), str(p2.name)],
+        "center_x(cols)": round(float(xc), 3),
+        "center_y(rows)": round(float(yc), 3),
+        "radius_px": round(float(r), 3),
+        "threshold_T": round(T, 6),
+        "median": round(med, 6),
+        "mad": round(mad, 6),
+        "params": {"k_bg": k_bg, "k_smooth": k_smooth,
+                   "dark_offset": dark_offset, "min_area": min_area}
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
-
+    Path("result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     with open("result.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["image_pair", "center_x(cols)", "center_y(rows)", "radius_px"])
-        writer.writerow([f"{p1.name} | {p2.name}", f"{xc:.3f}", f"{yc:.3f}", f"{r:.3f}"])
-
+        w = csv.writer(f);
+        w.writerow(["center_x(cols)", "center_y(rows)", "radius_px", "T", "median", "mad", "k_bg", "k_smooth", "dark_offset", "min_area"])
+        w.writerow([result["center_x(cols)"], result["center_y(rows)"], result["radius_px"],
+                    result["threshold_T"], result["median"], result["mad"],
+                    k_bg, k_smooth, dark_offset, min_area])
 
 if __name__ == "__main__":
-    main()
+    run_pipeline(
+        img1_path="1.png",
+        img2_path="2.png",
+        k_bg=51,          # 背景核,去除条纹残留
+        k_smooth=5,       # 细节降噪
+        dark_offset=0.05, # 最小暗度偏移阈值（0.03~0.10 可调）
+        min_area=2000     # 目标连通域的最小面积（分辨率不同需调整）
+    )
