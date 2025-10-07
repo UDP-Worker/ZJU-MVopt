@@ -122,7 +122,8 @@ def _get_features(
 def _run_style_transfer(
     content: torch.Tensor,
     style: torch.Tensor,
-    mask: torch.Tensor,
+    content_mask: torch.Tensor,
+    style_mask: torch.Tensor,
     device: torch.device,
     num_steps: int = 400,
     style_weight: float = 1e4,
@@ -171,12 +172,14 @@ def _run_style_transfer(
 
     content_targets = _get_features(vgg, content, content_layers, mean, std)
     style_targets = _get_features(vgg, style, style_layers, mean, std)
-    style_grams = {layer: _gram_matrix(feat).detach() for layer, feat in style_targets.items()}
+    style_grams = {
+        layer: _gram_matrix(feat, mask=style_mask).detach() for layer, feat in style_targets.items()
+    }
 
     input_img = content.clone().requires_grad_(True)
     optimizer = optim.Adam([input_img], lr=0.03)
 
-    background_mask = 1.0 - mask
+    background_mask = 1.0 - content_mask
 
     combined_layers = tuple(dict.fromkeys(content_layers + style_layers))
 
@@ -191,7 +194,7 @@ def _run_style_transfer(
 
         style_loss = 0.0
         for layer in style_layers:
-            input_gram = _gram_matrix(input_features[layer], mask=mask)
+            input_gram = _gram_matrix(input_features[layer], mask=content_mask)
             target_gram = style_grams[layer]
             style_loss = style_loss + style_layer_weights[layer] * F.mse_loss(input_gram, target_gram)
 
@@ -254,17 +257,21 @@ def main() -> None:
     content_tensor, _ = _load_image(args.content, device=device, max_size=args.max_size)
     style_tensor, _ = _load_image(args.style, device=device, max_size=args.max_size)
 
-    mask = _prepare_mask(content_tensor)
+    content_mask = _prepare_mask(content_tensor)
+    style_mask = _prepare_mask(style_tensor)
     if torch.cuda.is_available():
-        mask = mask.to(device)
-    mask = mask.clamp(0.0, 1.0)
+        content_mask = content_mask.to(device)
+        style_mask = style_mask.to(device)
+    content_mask = content_mask.clamp(0.0, 1.0)
+    style_mask = style_mask.clamp(0.0, 1.0)
 
-    print("Face mask coverage: {:.2f}%".format(mask.mean().item() * 100))
+    print("Face mask coverage: {:.2f}%".format(content_mask.mean().item() * 100))
 
     output = _run_style_transfer(
         content_tensor,
         style_tensor,
-        mask,
+        content_mask,
+        style_mask,
         device=device,
         num_steps=args.steps,
         style_weight=args.style_weight,
