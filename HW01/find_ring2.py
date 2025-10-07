@@ -89,6 +89,28 @@ def pick_center_component(mask01: np.ndarray, min_area: int = 150) -> np.ndarray
                 best, bestd = i, d2
     return (labels == best).astype(np.uint8), stats, cents
 
+def fill_holes_cv(mask01: np.ndarray) -> np.ndarray:
+    m = (mask01 * 255).astype(np.uint8)
+    h, w = m.shape
+    inv = cv2.bitwise_not(m)
+    ff = inv.copy()
+    mask = np.zeros((h+2, w+2), np.uint8)
+    cv2.floodFill(ff, mask, seedPoint=(0, 0), newVal=255)
+    holes = cv2.bitwise_not(ff)
+    filled = cv2.bitwise_or(m, holes)
+    return (filled > 0).astype(np.uint8)
+
+def boundary_outer_only(mask01: np.uint8) -> np.ndarray:
+    filled = fill_holes_cv(mask01)
+    cv2.imwrite("step5b_filled.png", filled * 255)
+
+    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        raise RuntimeError("未找到外轮廓")
+    cnt = max(contours, key=cv2.contourArea)
+    pts = cnt.reshape(-1, 2).astype(np.float64)
+    return pts
+
 def run_pipeline(img1_path="1.png", img2_path="2.png",
                  k_bg=51,         # 大核背景（平坦化）
                  k_smooth=5,      # 小核去噪
@@ -135,7 +157,9 @@ def run_pipeline(img1_path="1.png", img2_path="2.png",
     save_gray01(str(out_dir/"step6_target_mask.png"), comp)
 
     # Step 7: 取边界并拟合圆
-    pts = boundary_from_mask(comp)
+    # pts = boundary_from_mask(comp)
+    pts = boundary_outer_only(comp)
+
     if pts.shape[0] < 10:
         raise RuntimeError("边界点过少，阈值/面积阈值可能过严。请调小 dark_offset 或 min_area。")
     xc, yc, r = fit_circle_algebraic(pts)
