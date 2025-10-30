@@ -29,17 +29,16 @@ def detect_bump(img, roi, show_debug=False):
     # Step 1. 生成圆形ROI mask
     Y, X = np.ogrid[:H, :W]
     mask = (X - x_c)**2 + (Y - y_c)**2 <= r**2
-    roi_img = np.zeros_like(img)
-    roi_img[mask] = img[mask]
 
     # Step 2. 去除大尺度背景（高斯模糊减法 = 高通滤波）
-    bg = gaussian_filter(roi_img, sigma=7.0)
-    hp = roi_img - bg
+    bg = gaussian_filter(img, sigma=7.0)
+    hp = img - bg
     hp[hp < 0] = 0.0  # 仅保留正峰值
+    hp[~mask] = 0.0
 
     # Step 3. 去除暗色笔迹或阴影（可选阈值）
-    thr = np.percentile(roi_img[mask], 20)  # 下20%作为阴影阈
-    hp[roi_img < thr] = 0.0
+    thr = np.percentile(img[mask], 20)  # 下20%作为阴影阈
+    hp[img < thr] = 0.0
 
     # Step 4. 在ROI内寻找最亮点
     iy, ix = np.unravel_index(np.argmax(hp), hp.shape)

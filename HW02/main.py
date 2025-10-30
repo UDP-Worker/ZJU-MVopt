@@ -8,7 +8,7 @@ from fft import fft as fft_filter
 from detect import detect_bump
 
 
-ROI = (531, 236, 70)
+ROI = (531, 236, 90)
 OUTPUT_IMAGE_ORIGINAL = "detection_result.png"
 OUTPUT_IMAGE_FILTERED = "detection_result_filtered.png"
 DETECTION_COORDS_PATH = "detection_coordinates.json"
