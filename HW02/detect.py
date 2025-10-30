@@ -5,23 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
 def detect_bump(img, roi, show_debug=False):
-    """
-    在给定圆形ROI内检测亮点（小凸起），返回其坐标（亚像素精度）。
 
-    参数
-    ----
-    img : np.ndarray
-        归一化灰度图像 (float32, [0,1])。
-    roi : tuple
-        (x_center, y_center, radius) 圆形ROI。
-    show_debug : bool
-        是否显示调试图像。
-
-    返回
-    ----
-    (x_sub, y_sub) : tuple(float, float)
-        检测到的亮点亚像素坐标。
-    """
     assert img.ndim == 2, "输入必须为灰度图像"
     x_c, y_c, r = roi
     H, W = img.shape
@@ -81,9 +65,6 @@ def detect_bump(img, roi, show_debug=False):
     return float(x_sub), float(y_sub)
 
 
-# ---------------------- #
-# 示例：直接运行测试
-# ---------------------- #
 if __name__ == "__main__":
     img = cv2.imread("source.png", cv2.IMREAD_GRAYSCALE).astype("float32") / 255.0
     roi = (531, 236, 60)
