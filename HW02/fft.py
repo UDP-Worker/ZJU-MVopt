@@ -4,13 +4,13 @@ from skimage.feature import peak_local_max
 
 def fft(
         img: np.ndarray,
-        threshold_rel: float = 0.35,   # 峰检测阈值（越小→去网格更强）
+        threshold_rel: float = 0.15,   # 峰检测阈值（越小→去网格更强）
         min_distance: int = 12,        # 峰间最小距离
         dc_margin: int = 25,           # 屏蔽中心直流区的半径
         band: int = 30,                # 限制峰靠近水平/垂直方向
-        sigma: float = 8.0,            # 高斯陷波半径（越大→去网格更彻底，但可能模糊）
+        sigma: float = 15.0,            # 高斯陷波半径（越大→去网格更彻底，但可能模糊）
         num_peaks: int = 24,           # 最大峰数量
-        restrict_axes: bool = True,    # 是否仅保留水平/垂直方向峰
+        restrict_axes: bool = False,    # 是否仅保留水平/垂直方向峰
         normalize_output: bool = True, # 是否输出归一化到[0,1]的结果
         show_debug: bool = False       # 是否显示调试图
 ) -> np.ndarray:
@@ -80,7 +80,7 @@ def fft(
     else:
         img_out = img_filt
 
-    img_out = 1 - img_out
+    # img_out = 1 - img_out
 
     # Step 9. 可选可视化
     if show_debug:
