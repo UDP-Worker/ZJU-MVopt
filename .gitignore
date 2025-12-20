@@ -12,9 +12,11 @@
 
 # tensorboard logs
 runs
+uploads
 # ALl csv and json files
 *.csv
 *.json
+*.pt
 
 # All zip files
 *.zip
