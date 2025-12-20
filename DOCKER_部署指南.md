@@ -2,12 +2,14 @@
 
 本指南用于将 `web_infer.py` 容器化并在其它设备部署。默认使用 CPU 推理，如需 GPU 请看文末说明。
 
-### 0.下载和导入镜像
+### 0.下载和导入镜像与模型
 在本仓库的`release`中下载并导入镜像
 
 ```bash
 gunzip -c mvopt-webinfer_latest.tar.gz | docker load
 ```
+
+同时，下载我们提供的模型`final_model.pt`并放入随后创建的模型目录中。
 
 ### 1. 准备模型与目录
 
