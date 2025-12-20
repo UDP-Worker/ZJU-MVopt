@@ -4,6 +4,10 @@
 # All images (from homework or intermediate result)
 *.png
 
+# Videos and data
+**/videos
+**/dataset
+
 # ALl csv and json files
 *.csv
 *.json
