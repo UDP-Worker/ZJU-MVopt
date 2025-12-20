@@ -9,6 +9,9 @@
 **/dataset
 **/images
 *.npy
+
+# tensorboard logs
+runs
 # ALl csv and json files
 *.csv
 *.json
