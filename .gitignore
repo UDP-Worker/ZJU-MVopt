@@ -9,7 +9,8 @@
 **/dataset
 **/images
 *.npy
-
+# docker file
+*.tar.gz
 # tensorboard logs
 runs
 uploads
