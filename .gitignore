@@ -8,7 +8,7 @@
 **/videos
 **/dataset
 **/images
-
+*.npy
 # ALl csv and json files
 *.csv
 *.json
