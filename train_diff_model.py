@@ -16,6 +16,8 @@ def parse_args():
     parser.add_argument("--labels", default="labels.npy", help="Path to labels .npy.")
     parser.add_argument("--out-dir", default="runs", help="Output directory for logs/checkpoints.")
     parser.add_argument("--run-name", default="", help="Run name (default: timestamp).")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint.")
+    parser.add_argument("--resume-path", default="", help="Path to checkpoint to resume.")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs.")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
@@ -177,6 +179,29 @@ def evaluate(model, loader, device, loss_fn):
     return avg_loss, acc, prec, rec, f1
 
 
+def save_checkpoint(path, epoch, model, optimizer, best_f1, train_idx, val_idx, test_idx):
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "best_f1": best_f1,
+            "train_idx": np.asarray(train_idx),
+            "val_idx": np.asarray(val_idx),
+            "test_idx": np.asarray(test_idx),
+        },
+        path,
+    )
+
+
+def checkpoint_kind(obj):
+    if isinstance(obj, dict) and "model_state" in obj:
+        return "full"
+    if isinstance(obj, dict) and obj and all(torch.is_tensor(v) for v in obj.values()):
+        return "state_dict"
+    return "unknown"
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -195,9 +220,47 @@ def main():
         input_size=args.input_size,
     )
     labels = np.asarray(dataset.labels)
-    train_idx, val_idx, test_idx = stratified_split(
-        labels, args.val_split, args.test_split, args.seed
-    )
+    checkpoint_path = ""
+    checkpoint = None
+    model_state = None
+    train_idx = val_idx = test_idx = None
+    if args.resume_path:
+        checkpoint_path = args.resume_path
+    elif args.resume:
+        if not args.run_name:
+            print("error: --resume requires --run-name or --resume-path", file=sys.stderr)
+            return 1
+        checkpoint_path = os.path.join(args.out_dir, args.run_name, "latest.pt")
+
+    if checkpoint_path:
+        if not os.path.isfile(checkpoint_path):
+            print(f"error: checkpoint not found: {checkpoint_path}", file=sys.stderr)
+            return 1
+        loaded = torch.load(checkpoint_path, map_location="cpu")
+        kind = checkpoint_kind(loaded)
+        if kind == "full":
+            checkpoint = loaded
+            model_state = checkpoint.get("model_state")
+            train_idx = checkpoint.get("train_idx")
+            val_idx = checkpoint.get("val_idx")
+            test_idx = checkpoint.get("test_idx")
+        elif kind == "state_dict":
+            model_state = loaded
+            print(
+                "warn: checkpoint is a model state dict; optimizer/epoch not restored.",
+                file=sys.stderr,
+            )
+        else:
+            print("error: unsupported checkpoint format.", file=sys.stderr)
+            return 1
+
+    if train_idx is None or val_idx is None or test_idx is None:
+        train_idx, val_idx, test_idx = stratified_split(
+            labels, args.val_split, args.test_split, args.seed
+        )
+    train_idx = np.asarray(train_idx)
+    val_idx = np.asarray(val_idx)
+    test_idx = np.asarray(test_idx)
     if len(train_idx) == 0 or len(val_idx) == 0 or len(test_idx) == 0:
         print("error: split produced empty subset. Adjust split ratios.", file=sys.stderr)
         return 1
@@ -247,17 +310,38 @@ def main():
     model = SimpleCNN(in_channels=4).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(args.out_dir, run_name)
+    if args.resume_path:
+        out_dir = os.path.dirname(os.path.abspath(args.resume_path))
+        run_name = os.path.basename(out_dir)
+    else:
+        run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(args.out_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=out_dir)
     writer.add_text("config", str(vars(args)))
     writer.add_text("class_counts", f"pos={pos_count}, neg={neg_count}")
 
     best_f1 = -1.0
+    start_epoch = 1
     best_path = os.path.join(out_dir, "best_model.pt")
+    latest_path = os.path.join(out_dir, "latest.pt")
 
-    for epoch in range(1, args.epochs + 1):
+    if model_state is not None:
+        model.load_state_dict(model_state)
+    if checkpoint is not None:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
+        best_f1 = checkpoint.get("best_f1", best_f1)
+        start_epoch = checkpoint.get("epoch", 0) + 1
+        writer.add_text("resume", f"path={checkpoint_path} start_epoch={start_epoch}")
+        if start_epoch > args.epochs:
+            print("error: start epoch exceeds total epochs.", file=sys.stderr)
+            return 1
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running_loss = 0.0
         num_batches = len(train_loader)
@@ -292,6 +376,16 @@ def main():
         if val_f1 > best_f1:
             best_f1 = val_f1
             torch.save(model.state_dict(), best_path)
+        save_checkpoint(
+            latest_path,
+            epoch,
+            model,
+            optimizer,
+            best_f1,
+            train_idx,
+            val_idx,
+            test_idx,
+        )
 
         print(
             f"epoch {epoch}/{args.epochs} "
