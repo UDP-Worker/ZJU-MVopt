@@ -39,12 +39,12 @@ jobs:
             type=raw,value=latest
             type=sha,format=short
 
-      - name: Build and push (linux multi-arch)
+      - name: Build and push (linux amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: ./HW04
           file: ./HW04/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/ppc64le
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
